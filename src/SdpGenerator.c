@@ -345,16 +345,38 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
     // ourselves so initialBitrateKbps does not exceed maximumBitrateKbps.
     adjustedBitrate = adjustedBitrate > 100000 ? 100000 : adjustedBitrate;
 
-    // We don't support dynamic bitrate scaling properly (it tends to bounce between min and max and never
-    // settle on the optimal bitrate if it's somewhere in the middle), so we'll just latch the bitrate
-    // to the requested value.
+    // Advertise a bitrate window so Sunshine/GFE can ramp up or down automatically.
+    // Prioritize giving headroom on the high side so quality increases quickly when bandwidth allows,
+    // but still let the host fall back when Wi-Fi conditions tank.
+    int minBitrateKbps = (int)(adjustedBitrate * 0.7f);
+    int maxBitrateKbps = (int)(adjustedBitrate * 1.4f);
+
+    // Leave at least 500 Kbps for video so we never drop to zero.
+    if (minBitrateKbps < 500) {
+        minBitrateKbps = 500;
+    }
+    // Always ensure the peak is above the requested value.
+    if (maxBitrateKbps <= adjustedBitrate) {
+        maxBitrateKbps = adjustedBitrate + 500;
+    }
+    // Keep everything within the encoder-defined ceiling.
+    if (maxBitrateKbps > 100000) {
+        maxBitrateKbps = 100000;
+    }
+    if (minBitrateKbps > maxBitrateKbps - 500) {
+        minBitrateKbps = maxBitrateKbps - 500;
+    }
+
     if (AppVersionQuad[0] >= 5) {
         snprintf(payloadStr, sizeof(payloadStr), "%d", adjustedBitrate);
-
         err |= addAttributeString(&optionHead, "x-nv-video[0].initialBitrateKbps", payloadStr);
+
+        snprintf(payloadStr, sizeof(payloadStr), "%d", maxBitrateKbps);
         err |= addAttributeString(&optionHead, "x-nv-video[0].initialPeakBitrateKbps", payloadStr);
 
+        snprintf(payloadStr, sizeof(payloadStr), "%d", minBitrateKbps);
         err |= addAttributeString(&optionHead, "x-nv-vqos[0].bw.minimumBitrateKbps", payloadStr);
+        snprintf(payloadStr, sizeof(payloadStr), "%d", maxBitrateKbps);
         err |= addAttributeString(&optionHead, "x-nv-vqos[0].bw.maximumBitrateKbps", payloadStr);
 
         // Send the configured bitrate to Sunshine hosts, so they can adjust for dynamic FEC percentage
@@ -369,8 +391,9 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
             err |= addAttributeString(&optionHead, "x-nv-video[0].peakBitrate", "4");
         }
 
-        snprintf(payloadStr, sizeof(payloadStr), "%d", adjustedBitrate);
+        snprintf(payloadStr, sizeof(payloadStr), "%d", minBitrateKbps);
         err |= addAttributeString(&optionHead, "x-nv-vqos[0].bw.minimumBitrate", payloadStr);
+        snprintf(payloadStr, sizeof(payloadStr), "%d", maxBitrateKbps);
         err |= addAttributeString(&optionHead, "x-nv-vqos[0].bw.maximumBitrate", payloadStr);
     }
     
