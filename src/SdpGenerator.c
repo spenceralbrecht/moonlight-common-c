@@ -328,15 +328,14 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
     // 20% of the video bitrate will added to the user-specified bitrate for FEC
     adjustedBitrate = (int)(StreamConfig.bitrate * 0.80);
 
-    // Use more strict bitrate logic when streaming remotely. The theory here is that remote
-    // streaming is much more bandwidth sensitive. Someone might select 5 Mbps because that's
-    // really all they have, so we need to be careful not to exceed the cap, even counting
-    // things like audio and control data.
+    // Use slightly more conservative bitrate logic when streaming remotely so we still leave
+    // room for audio, control traffic, and VPN overhead, but keep the penalty low enough that
+    // productivity-focused streams over Tailscale don't get needlessly soft.
     if (StreamConfig.streamingRemotely == STREAM_CFG_REMOTE) {
-        // Subtract 500 Kbps to leave room for audio and control. On remote streams,
+        // Subtract 350 Kbps to leave room for audio and control. On remote streams,
         // GFE will use 96Kbps stereo audio. For local streams, it will choose 512Kbps.
-        if (adjustedBitrate > 500) {
-            adjustedBitrate -= 500;
+        if (adjustedBitrate > 350) {
+            adjustedBitrate -= 350;
         }
     }
 
@@ -346,10 +345,13 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
     adjustedBitrate = adjustedBitrate > 100000 ? 100000 : adjustedBitrate;
 
     // Advertise a bitrate window so Sunshine/GFE can ramp up or down automatically.
-    // Prioritize giving headroom on the high side so quality increases quickly when bandwidth allows,
-    // but still let the host fall back when Wi-Fi conditions tank.
-    int minBitrateKbps = (int)(adjustedBitrate * 0.7f);
-    int maxBitrateKbps = (int)(adjustedBitrate * 1.4f);
+    // Favor a wider ceiling for faster quality recovery, while keeping enough room on the
+    // low side that the host can still react if the connection temporarily degrades.
+    float minBitrateFactor = StreamConfig.streamingRemotely == STREAM_CFG_REMOTE ? 0.65f : 0.80f;
+    float maxBitrateFactor = StreamConfig.streamingRemotely == STREAM_CFG_REMOTE ? 1.55f : 1.65f;
+    int minBitrateKbps = (int)(adjustedBitrate * minBitrateFactor);
+    int maxBitrateKbps = (int)(adjustedBitrate * maxBitrateFactor);
+    int startupBitrateKbps;
 
     // Leave at least 500 Kbps for video so we never drop to zero.
     if (minBitrateKbps < 500) {
@@ -367,8 +369,16 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         minBitrateKbps = maxBitrateKbps - 500;
     }
 
+    startupBitrateKbps = adjustedBitrate;
+    if (maxBitrateKbps > adjustedBitrate) {
+        startupBitrateKbps += (maxBitrateKbps - adjustedBitrate) / 3;
+    }
+    if (startupBitrateKbps > maxBitrateKbps) {
+        startupBitrateKbps = maxBitrateKbps;
+    }
+
     if (AppVersionQuad[0] >= 5) {
-        snprintf(payloadStr, sizeof(payloadStr), "%d", adjustedBitrate);
+        snprintf(payloadStr, sizeof(payloadStr), "%d", startupBitrateKbps);
         err |= addAttributeString(&optionHead, "x-nv-video[0].initialBitrateKbps", payloadStr);
 
         snprintf(payloadStr, sizeof(payloadStr), "%d", maxBitrateKbps);
