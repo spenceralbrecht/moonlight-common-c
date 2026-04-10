@@ -1664,11 +1664,19 @@ int startControlStream(void) {
 
         client->intercept = ignoreDisconnectIntercept;
 
-        // Enable high priority QoS marking on control stream traffic
-        //
-        // NB: It is important to do this before connecting because there's logic in the connect
-        // retransmission code to detect QoS-intolerant routes and disable QoS marking for those.
-        enet_socket_set_option (client->socket, ENET_SOCKOPT_QOS, 1);
+        // Only enable ENet QoS marking on local routes. On some remote VPN/cellular paths,
+        // DSCP/ECN-marked control packets are more likely to be delayed or dropped than the
+        // plain UDP audio/video traffic, which stalls the session before the control stream
+        // ever raises. Sunshine already receives qosTrafficType=0 in the remote SDP path, so
+        // keeping the ENet control socket unmarked remotely aligns the transport behavior.
+        if (StreamConfig.streamingRemotely == STREAM_CFG_LOCAL) {
+            // NB: It is important to do this before connecting because there's logic in the connect
+            // retransmission code to detect QoS-intolerant routes and disable QoS marking for those.
+            enet_socket_set_option(client->socket, ENET_SOCKOPT_QOS, 1);
+        }
+        else {
+            Limelog("Skipping ENet QoS marking on remote control stream\n");
+        }
 
         // Connect to the host
         peer = enet_host_connect(client, &remoteAddress, CTRL_CHANNEL_COUNT, ControlConnectData);

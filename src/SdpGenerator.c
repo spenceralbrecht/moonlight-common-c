@@ -502,19 +502,25 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
             err |= addAttributeString(&optionHead, "x-nv-video[0].clientRefreshRateX100", payloadStr);
         }
 
-        snprintf(payloadStr, sizeof(payloadStr), "%d", audioChannelCount);
-        err |= addAttributeString(&optionHead, "x-nv-audio.surround.numChannels", payloadStr);
-        snprintf(payloadStr, sizeof(payloadStr), "%d", audioChannelMask);
-        err |= addAttributeString(&optionHead, "x-nv-audio.surround.channelMask", payloadStr);
-        if (audioChannelCount > 2) {
-            err |= addAttributeString(&optionHead, "x-nv-audio.surround.enable", "1");
-        }
-        else {
-            err |= addAttributeString(&optionHead, "x-nv-audio.surround.enable", "0");
+        if (StreamConfig.enableAudio) {
+            snprintf(payloadStr, sizeof(payloadStr), "%d", audioChannelCount);
+            err |= addAttributeString(&optionHead, "x-nv-audio.surround.numChannels", payloadStr);
+            snprintf(payloadStr, sizeof(payloadStr), "%d", audioChannelMask);
+            err |= addAttributeString(&optionHead, "x-nv-audio.surround.channelMask", payloadStr);
+            if (audioChannelCount > 2) {
+                err |= addAttributeString(&optionHead, "x-nv-audio.surround.enable", "1");
+            }
+            else {
+                err |= addAttributeString(&optionHead, "x-nv-audio.surround.enable", "0");
+            }
         }
     }
 
-    if (AppVersionQuad[0] >= 7) {
+    if (!StreamConfig.enableAudio) {
+        AudioPacketDuration = 0;
+        HighQualitySurroundEnabled = false;
+    }
+    else if (AppVersionQuad[0] >= 7) {
         if (StreamConfig.bitrate >= HIGH_AUDIO_BITRATE_THRESHOLD && audioChannelCount > 2 &&
                 HighQualitySurroundSupported && (AudioCallbacks.capabilities & CAPABILITY_SLOW_OPUS_DECODER) == 0) {
             // Enable high quality mode for surround sound

@@ -263,6 +263,14 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     memcpy(&StreamConfig, streamConfig, sizeof(StreamConfig));
     RemoteAddrString = strdup(serverInfo->address);
 
+    if (!serverInfo->isNvidiaServerSoftware && !StreamConfig.enableAudio) {
+        // Sunshine's RTSP ANNOUNCE parser requires the audio negotiation keys even if
+        // the client would prefer a silent session, so fully disabling audio transport
+        // causes Sunshine to reject the session with 400 BAD REQUEST.
+        Limelog("Sunshine requires audio negotiation; forcing audio transport enabled\n");
+        StreamConfig.enableAudio = true;
+    }
+
     // The values in RTSP SETUP will be used to populate these.
     VideoPortNumber = 0;
     ControlPortNumber = 0;

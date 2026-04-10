@@ -23,6 +23,32 @@ static SOCKET sock = INVALID_SOCKET;
 static ENetHost* client;
 static ENetPeer* peer;
 
+static bool updateSessionIdFromSetupResponse(PRTSP_MESSAGE response) {
+    char* sessionId;
+    char* sessionIdCopy;
+    char* strtokCtx = NULL;
+
+    sessionId = getOptionContent(response->options, "Session");
+    if (sessionId == NULL) {
+        Limelog("RTSP SETUP response is missing session attribute\n");
+        return false;
+    }
+
+    sessionIdCopy = strdup(strtok_r(sessionId, ";", &strtokCtx));
+    if (sessionIdCopy == NULL) {
+        Limelog("Failed to duplicate session ID string\n");
+        return false;
+    }
+
+    if (sessionIdString != NULL) {
+        free(sessionIdString);
+    }
+
+    sessionIdString = sessionIdCopy;
+    hasSessionId = true;
+    return true;
+}
+
 #define CHAR_TO_INT(x) ((x) - '0')
 #define CHAR_IS_DIGIT(x) ((x) >= '0' && (x) <= '9')
 
@@ -727,6 +753,13 @@ static bool parseServerPortFromTransport(PRTSP_MESSAGE response, uint16_t* port)
 
 // Parses the Opus configuration from an RTSP DESCRIBE response
 static int parseOpusConfigurations(PRTSP_MESSAGE response) {
+    if (!StreamConfig.enableAudio) {
+        HighQualitySurroundSupported = false;
+        memset(&NormalQualityOpusConfig, 0, sizeof(NormalQualityOpusConfig));
+        memset(&HighQualityOpusConfig, 0, sizeof(HighQualityOpusConfig));
+        return 0;
+    }
+
     HighQualitySurroundSupported = false;
     memset(&NormalQualityOpusConfig, 0, sizeof(NormalQualityOpusConfig));
     memset(&HighQualityOpusConfig, 0, sizeof(HighQualityOpusConfig));
@@ -945,7 +978,8 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     // 2. The audio decoder has not declared that it is slow
     // 3. The stream is either local or not surround sound (to prevent MTU issues over the Internet)
     LC_ASSERT(StreamConfig.streamingRemotely != STREAM_CFG_AUTO);
-    if (StreamConfig.bitrate >= HIGH_AUDIO_BITRATE_THRESHOLD &&
+    if (StreamConfig.enableAudio &&
+            StreamConfig.bitrate >= HIGH_AUDIO_BITRATE_THRESHOLD &&
             (AudioCallbacks.capabilities & CAPABILITY_SLOW_OPUS_DECODER) == 0 &&
             (StreamConfig.streamingRemotely != STREAM_CFG_REMOTE || CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) <= 2)) {
         // If we have an RTSP URL string and it was successfully parsed and copied, use that string
@@ -962,7 +996,16 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
     }
     else {
-        PltSafeStrcpy(urlAddr, sizeof(urlAddr), "0.0.0.0");
+        // The 0.0.0.0 address is a legacy GFE hack to coerce low-quality audio,
+        // but Sunshine rejects ANNOUNCE requests with a Host header of 0.0.0.0.
+        // Sunshine may still expose a GFE version string, so use the explicit
+        // server type flag that Java resolved during server-info parsing.
+        bool isNvidiaServer = serverInfo->isNvidiaServerSoftware;
+        if (isNvidiaServer) {
+            PltSafeStrcpy(urlAddr, sizeof(urlAddr), "0.0.0.0");
+        } else {
+            addrToUrlSafeString(&RemoteAddr, urlAddr, sizeof(urlAddr));
+        }
         snprintf(rtspTargetUrl, sizeof(rtspTargetUrl), "rtsp%s://%s:%u", useEnet ? "ru" : "", urlAddr, RtspPortNumber);
     }
 
@@ -1120,12 +1163,10 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         freeMessage(&response);
     }
 
-    {
+    if (StreamConfig.enableAudio) {
         RTSP_MESSAGE response;
-        char* sessionId;
         char* pingPayload;
         int error = -1;
-        char* strtokCtx = NULL;
 
         if (!setupStream(&response,
                          AppVersionQuad[0] >= 5 ? "streamid=audio/0/0" : "streamid=audio",
@@ -1166,27 +1207,10 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         // which is not the case for the video stream.
         notifyAudioPortNegotiationComplete();
 
-        sessionId = getOptionContent(response.options, "Session");
-
-        if (sessionId == NULL) {
-            Limelog("RTSP SETUP streamid=audio is missing session attribute\n");
+        if (!updateSessionIdFromSetupResponse(&response)) {
             ret = -1;
             goto Exit;
         }
-
-        // Given there is a non-null session id, get the
-        // first token of the session until ";", which 
-        // resolves any 454 session not found errors on
-        // standard RTSP server implementations.
-        // (i.e - sessionId = "DEADBEEFCAFE;timeout = 90") 
-        sessionIdString = strdup(strtok_r(sessionId, ";", &strtokCtx));
-        if (sessionIdString == NULL) {
-            Limelog("Failed to duplicate session ID string\n");
-            ret = -1;
-            goto Exit;
-        }
-
-        hasSessionId = true;
 
         freeMessage(&response);
     }
@@ -1228,6 +1252,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
         else {
             Limelog("Video port: %u\n", VideoPortNumber);
+        }
+
+        if (!hasSessionId && !updateSessionIdFromSetupResponse(&response)) {
+            ret = -1;
+            goto Exit;
         }
 
         freeMessage(&response);
@@ -1338,7 +1367,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             freeMessage(&response);
         }
 
-        {
+        if (StreamConfig.enableAudio) {
             RTSP_MESSAGE response;
             int error = -1;
 

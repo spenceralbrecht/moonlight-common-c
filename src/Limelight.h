@@ -66,6 +66,11 @@ typedef struct _STREAM_CONFIGURATION {
     // is remote or not.
     int streamingRemotely;
 
+    // Specifies whether the audio stream should be negotiated at all.
+    // When disabled, Moonlight skips the audio launch, SDP, RTSP, and
+    // decoder paths entirely.
+    int enableAudio;
+
     // Specifies the channel configuration of the audio stream.
     // See AUDIO_CONFIGURATION constants and MAKE_AUDIO_CONFIGURATION() below.
     int audioConfiguration;
@@ -509,6 +514,9 @@ typedef struct _SERVER_INFORMATION {
 
     // Text inside 'sessionUrl0' tag in /resume and /launch (if present)
     const char* rtspSessionUrl;
+
+    // True for NVIDIA GFE/GeForce Experience hosts, false for Sunshine.
+    bool isNvidiaServerSoftware;
 
     // Specifies the 'ServerCodecModeSupport' from the /serverinfo response.
     int serverCodecModeSupport;

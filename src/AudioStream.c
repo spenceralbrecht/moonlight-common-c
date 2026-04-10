@@ -66,6 +66,10 @@ static void AudioPingThreadProc(void* context) {
 
 // Initialize the audio stream and start
 int initializeAudioStream(void) {
+    if (!StreamConfig.enableAudio) {
+        return 0;
+    }
+
     LbqInitializeLinkedBlockingQueue(&packetQueue, 30);
     RtpaInitializeQueue(&rtpAudioQueue);
     lastSeq = 0;
@@ -88,6 +92,10 @@ int initializeAudioStream(void) {
 // number is parsed out of it. Alternatively, it's also called if parsing fails
 // and will use the well known audio port instead.
 int notifyAudioPortNegotiationComplete(void) {
+    if (!StreamConfig.enableAudio) {
+        return 0;
+    }
+
     LC_ASSERT(!pingThreadStarted);
     LC_ASSERT(AudioPortNumber != 0);
 
@@ -124,6 +132,10 @@ static void freePacketList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 
 // Tear down the audio stream once we're done with it
 void destroyAudioStream(void) {
+    if (!StreamConfig.enableAudio) {
+        return;
+    }
+
     if (rtpSocket != INVALID_SOCKET) {
         if (pingThreadStarted) {
             PltInterruptThread(&udpPingThread);
@@ -397,6 +409,10 @@ static void AudioDecoderThreadProc(void* context) {
 }
 
 void stopAudioStream(void) {
+    if (!StreamConfig.enableAudio) {
+        return;
+    }
+
     if (!receivedDataFromPeer) {
         Limelog("No audio traffic was ever received from the host!\n");
     }
@@ -419,6 +435,10 @@ void stopAudioStream(void) {
 }
 
 int startAudioStream(void* audioContext, int arFlags) {
+    if (!StreamConfig.enableAudio) {
+        return 0;
+    }
+
     int err;
     OPUS_MULTISTREAM_CONFIGURATION chosenConfig;
 
