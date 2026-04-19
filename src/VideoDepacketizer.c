@@ -436,12 +436,26 @@ static void skipToNextNalOrEnd(PBUFFER_DESC buffer) {
     }
 }
 
-// Advance the buffer descriptor to the start of the next NAL
-static void skipToNextNal(PBUFFER_DESC buffer) {
+// Advance the buffer descriptor to the start of the next NAL.
+// Returns false if we reached the end of the buffer without finding one.
+static bool skipToNextNal(PBUFFER_DESC buffer) {
     skipToNextNalOrEnd(buffer);
+    return buffer->length > 0;
+}
 
-    // If we skipped all the data, something has gone horribly wrong
-    LC_ASSERT(buffer->length > 0);
+static void dropMalformedFrame(unsigned int frameIndex, const char* reason) {
+    Limelog("Dropping malformed video frame %u: %s\n", frameIndex, reason);
+
+    decodingFrame = false;
+    nextFrameNumber = frameIndex + 1;
+    dropFrameState();
+
+    if (waitingForIdrFrame) {
+        LiRequestIdrFrame();
+    }
+    else {
+        connectionDetectedFrameLoss(startFrameNumber, frameIndex);
+    }
 }
 
 static bool isIdrFrameStart(PBUFFER_DESC buffer) {
@@ -644,7 +658,9 @@ static void queueFragment(PLENTRY_INTERNAL* existingEntry, char* data, int offse
 }
 
 // Process an RTP Payload using the slow path that handles multiple NALUs per packet
-static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERNAL* existingEntry) {
+static bool processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos,
+                                         PLENTRY_INTERNAL* existingEntry,
+                                         unsigned int frameIndex) {
     // We should not have any NALUs when processing the first packet in an IDR frame
     LC_ASSERT(nalChainHead == NULL);
     LC_ASSERT(nalChainTail == NULL);
@@ -652,14 +668,20 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
     while (currentPos->length != 0) {
         // Skip through any padding bytes
         if (!getAnnexBStartSequence(currentPos, NULL)) {
-            skipToNextNal(currentPos);
+            if (!skipToNextNal(currentPos)) {
+                dropMalformedFrame(frameIndex, "missing NAL after leading padding");
+                return false;
+            }
         }
 
         // Skip any prepended AUD or SEI NALUs. We may have padding between
         // these on IDR frames, so the check in processRtpPayload() is not
         // completely sufficient to handle that case.
         while (isAccessUnitDelimiter(currentPos) || isSeiNal(currentPos)) {
-            skipToNextNal(currentPos);
+            if (!skipToNextNal(currentPos)) {
+                dropMalformedFrame(frameIndex, "missing picture data after AUD/SEI");
+                return false;
+            }
         }
 
         int start = currentPos->offset;
@@ -703,6 +725,8 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
         queueFragment(containsPicData ? existingEntry : NULL,
                       currentPos->data, start, currentPos->offset - start);
     }
+
+    return true;
 }
 
 // Dumps the decode unit queue and ensures the next frame submitted to the decoder will be
@@ -969,20 +993,29 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 
                 // For release builds, we will try to recover by searching for one.
                 // This mimics the way most decoders handle this situation.
-                skipToNextNal(&currentPos);
+                if (!skipToNextNal(&currentPos)) {
+                    dropMalformedFrame(frameIndex, "missing start sequence in first packet");
+                    return;
+                }
             }
 
             // If an AUD NAL is prepended to this frame data, remove it.
             // Other parts of this code are not prepared to deal with a
             // NAL of that type, so stripping it is the easiest option.
             if (isAccessUnitDelimiter(&currentPos)) {
-                skipToNextNal(&currentPos);
+                if (!skipToNextNal(&currentPos)) {
+                    dropMalformedFrame(frameIndex, "AUD without following picture data");
+                    return;
+                }
             }
 
             // There may be one or more SEI NAL units prepended to the
             // frame data *after* the (optional) AUD.
             while (isSeiNal(&currentPos)) {
-                skipToNextNal(&currentPos);
+                if (!skipToNextNal(&currentPos)) {
+                    dropMalformedFrame(frameIndex, "SEI without following picture data");
+                    return;
+                }
             }
         }
     }
@@ -994,13 +1027,23 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     if (NegotiatedVideoFormat & (VIDEO_FORMAT_MASK_H264 | VIDEO_FORMAT_MASK_H265)) {
         if (firstPacket && isIdrFrameStart(&currentPos)) {
             // SPS and PPS prefix is padded between NALs, so we must decode it with the slow path
-            processAvcHevcRtpPayloadSlow(&currentPos, existingEntry);
+            if (!processAvcHevcRtpPayloadSlow(&currentPos, existingEntry, frameIndex)) {
+                return;
+            }
         }
         else {
             // Intel's H.264 Media Foundation encoder prepends a PPS to each P-frame.
             // Skip it to avoid confusing clients.
             if (firstPacket && isPictureParameterSetNal(&currentPos)) {
-                skipToNextNal(&currentPos);
+                if (!skipToNextNal(&currentPos)) {
+                    dropMalformedFrame(frameIndex, "PPS without following picture data");
+                    return;
+                }
+            }
+
+            if (currentPos.length == 0) {
+                dropMalformedFrame(frameIndex, "empty picture payload");
+                return;
             }
 
 #ifdef FORCE_3_BYTE_START_SEQUENCES
