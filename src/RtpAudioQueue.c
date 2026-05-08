@@ -239,7 +239,6 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
 
         if (length < sizeof(RTP_PACKET) + sizeof(AUDIO_FEC_HEADER)) {
             Limelog("RTP audio FEC packet too small: %u\n", length);
-            LC_ASSERT_VT(false);
             return NULL;
         }
 
@@ -253,7 +252,6 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
         // later during recovery.
         if (fecHeader->fecShardIndex >= RTPA_FEC_SHARDS) {
             Limelog("Too many audio FEC shards: %u\n", fecHeader->fecShardIndex);
-            LC_ASSERT_VT(false);
             return NULL;
         }
 
@@ -264,7 +262,6 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
             Limelog("Invalid FEC block base sequence number (got %u, expected %u)\n",
                     fecBlockBaseSeqNum, (fecBlockBaseSeqNum / RTPA_DATA_SHARDS) * RTPA_DATA_SHARDS);
             Limelog("Audio FEC has been disabled due to an incompatibility with your host's old software!\n");
-            LC_ASSERT_VT(fecBlockBaseSeqNum % RTPA_DATA_SHARDS == 0);
             queue->incompatibleServer = true;
             return NULL;
         }
@@ -273,7 +270,6 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
     }
     else {
         Limelog("Invalid RTP audio payload type: %u\n", packet->packetType);
-        LC_ASSERT_VT(false);
         return NULL;
     }
 
@@ -306,7 +302,6 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
                 // constant size for audio packets.
                 Limelog("Audio block size mismatch (got %u, expected %u)\n", blockSize, existingBlock->blockSize);
                 Limelog("Audio FEC has been disabled due to an incompatibility with your host's old software!\n");
-                LC_ASSERT_VT(existingBlock->blockSize == blockSize);
                 queue->incompatibleServer = true;
                 return NULL;
             }
