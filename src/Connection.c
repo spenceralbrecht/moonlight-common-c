@@ -18,6 +18,7 @@ DECODER_RENDERER_CALLBACKS VideoCallbacks;
 AUDIO_RENDERER_CALLBACKS AudioCallbacks;
 int NegotiatedVideoFormat;
 volatile bool ConnectionInterrupted;
+static bool ConnectionPreparedExternally;
 bool HighQualitySurroundSupported;
 bool HighQualitySurroundEnabled;
 OPUS_MULTISTREAM_CONFIGURATION NormalQualityOpusConfig;
@@ -63,6 +64,14 @@ const char* LiGetStageName(int stage) {
 void LiInterruptConnection(void) {
     // Signal anyone waiting on the global interrupted flag
     ConnectionInterrupted = true;
+}
+
+// Prepares the global connection state before an owner is published to another thread. Android's
+// lifecycle gate uses this split phase so a stop arriving between preparation and LiStartConnection
+// remains visible instead of being cleared at the beginning of the start call.
+void LiPrepareConnection(void) {
+    ConnectionInterrupted = false;
+    ConnectionPreparedExternally = true;
 }
 
 // Stop the connection by undoing the step at the current stage and those before it
@@ -211,6 +220,15 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     void* audioContext, int arFlags) {
     int err;
 
+    // Preserve an interrupt delivered after LiPrepareConnection(). Other callers retain the
+    // historical behavior where each LiStartConnection() clears stale interruption state itself.
+    if (ConnectionPreparedExternally) {
+        ConnectionPreparedExternally = false;
+    }
+    else {
+        ConnectionInterrupted = false;
+    }
+
     if (drCallbacks != NULL && (drCallbacks->capabilities & CAPABILITY_PULL_RENDERER) && drCallbacks->submitDecodeUnit) {
         Limelog("CAPABILITY_PULL_RENDERER cannot be set with a submitDecodeUnit callback\n");
         LC_ASSERT(false);
@@ -280,8 +298,6 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     }
 
     alreadyTerminated = false;
-    ConnectionInterrupted = false;
-    
     // Validate the audio configuration
     if (MAGIC_BYTE_FROM_AUDIO_CONFIG(StreamConfig.audioConfiguration) != 0xCA ||
             CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) > AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT) {

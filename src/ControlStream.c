@@ -97,6 +97,14 @@ static LINKED_BLOCKING_QUEUE invalidReferenceFrameTuples;
 static LINKED_BLOCKING_QUEUE frameFecStatusQueue;
 static LINKED_BLOCKING_QUEUE asyncCallbackQueue;
 static PLT_EVENT idrFrameRequiredEvent;
+static PLT_MUTEX idrRequestMutex;
+static uint32_t pendingIdrRequestCount;
+static uint64_t lastIdrFrameRequestTimeMs;
+static uint64_t lastIdrPacingLogTimeMs;
+static uint32_t idrFrameRequestTriggers;
+static uint32_t idrFrameRequestsSent;
+static uint32_t idrFrameRequestsCoalesced;
+static uint32_t idrFrameRequestsDeferred;
 
 static PPLT_CRYPTO_CONTEXT encryptionCtx;
 static PPLT_CRYPTO_CONTEXT decryptionCtx;
@@ -105,6 +113,8 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define CONN_CONSECUTIVE_POOR_LOSS_RATE 15
 #define CONN_OKAY_LOSS_RATE 5
 #define CONN_STATUS_SAMPLE_PERIOD 3000
+#define IDR_REQUEST_MIN_INTERVAL_MS 250
+#define IDR_REQUEST_PACING_LOG_INTERVAL_MS 5000
 
 #define IDX_START_A 0
 #define IDX_REQUEST_IDR_FRAME 0
@@ -277,6 +287,7 @@ static bool supportsIdrFrameRequest;
 // Initializes the control stream
 int initializeControlStream(void) {
     stopping = false;
+    PltCreateMutex(&idrRequestMutex);
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&invalidReferenceFrameTuples, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
@@ -328,6 +339,13 @@ int initializeControlStream(void) {
     lastConnectionStatusUpdate = CONN_STATUS_OKAY;
     firstFrameTimeMs = 0;
     currentEnetSequenceNumber = 0;
+    pendingIdrRequestCount = 0;
+    lastIdrFrameRequestTimeMs = 0;
+    lastIdrPacingLogTimeMs = 0;
+    idrFrameRequestTriggers = 0;
+    idrFrameRequestsSent = 0;
+    idrFrameRequestsCoalesced = 0;
+    idrFrameRequestsDeferred = 0;
     usePeriodicPing = APP_VERSION_AT_LEAST(7, 1, 415);
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
@@ -353,6 +371,7 @@ void destroyControlStream(void) {
     PltDestroyCryptoContext(encryptionCtx);
     PltDestroyCryptoContext(decryptionCtx);
     PltCloseEvent(&idrFrameRequiredEvent);
+    PltDeleteMutex(&idrRequestMutex);
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&invalidReferenceFrameTuples));
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue));
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue));
@@ -391,8 +410,15 @@ void LiRequestIdrFrame(void) {
     // We require a full IDR frame to recover.
     freeBasicLbqList(LbqFlushQueueItems(&invalidReferenceFrameTuples));
 
-    // Request the IDR frame
+    // Record every recovery trigger so the request thread can coalesce an observed storm while
+    // retaining useful diagnostics. Holding the mutex across the event update prevents a request
+    // from being lost when the consumer clears the event.
+    PltLockMutex(&idrRequestMutex);
+    if (pendingIdrRequestCount != UINT32_MAX) {
+        pendingIdrRequestCount++;
+    }
     PltSetEvent(&idrFrameRequiredEvent);
+    PltUnlockMutex(&idrRequestMutex);
 }
 
 // Invalidate reference frames lost by the network
@@ -1453,7 +1479,6 @@ static void requestIdrFrame(void) {
         }
     }
 
-    Limelog("IDR frame request sent\n");
 }
 
 static void requestInvalidateReferenceFrames(uint32_t startFrame, uint32_t endFrame) {
@@ -1509,14 +1534,87 @@ static void invalidateRefFramesFunc(void* context) {
     }
 }
 
+static uint32_t consumePendingIdrRequests(void) {
+    uint32_t requestCount;
+
+    PltLockMutex(&idrRequestMutex);
+    requestCount = pendingIdrRequestCount;
+    pendingIdrRequestCount = 0;
+    PltClearEvent(&idrFrameRequiredEvent);
+    PltUnlockMutex(&idrRequestMutex);
+
+    return requestCount;
+}
+
+static uint32_t saturatingAddUint32(uint32_t left, uint32_t right) {
+    return UINT32_MAX - left < right ? UINT32_MAX : left + right;
+}
+
+static void recordIdrRequestPacing(uint32_t triggerCount, bool deferred) {
+    uint64_t now = PltGetMillis();
+
+    idrFrameRequestTriggers = saturatingAddUint32(idrFrameRequestTriggers, triggerCount);
+    idrFrameRequestsSent = saturatingAddUint32(idrFrameRequestsSent, 1);
+    if (triggerCount > 1) {
+        idrFrameRequestsCoalesced = saturatingAddUint32(
+                idrFrameRequestsCoalesced,
+                triggerCount - 1);
+    }
+    if (deferred) {
+        idrFrameRequestsDeferred = saturatingAddUint32(idrFrameRequestsDeferred, 1);
+    }
+
+    if (idrFrameRequestsSent == 1 ||
+            now - lastIdrPacingLogTimeMs >= IDR_REQUEST_PACING_LOG_INTERVAL_MS) {
+        Limelog("IDR request pacing: triggers=%u sent=%u coalesced=%u deferred=%u minIntervalMs=%u\n",
+                idrFrameRequestTriggers,
+                idrFrameRequestsSent,
+                idrFrameRequestsCoalesced,
+                idrFrameRequestsDeferred,
+                IDR_REQUEST_MIN_INTERVAL_MS);
+        lastIdrPacingLogTimeMs = now;
+    }
+}
+
 static void requestIdrFrameFunc(void* context) {
     while (!PltIsThreadInterrupted(&requestIdrFrameThread)) {
+        uint32_t triggerCount;
+        bool deferred = false;
+
         PltWaitForEvent(&idrFrameRequiredEvent);
-        PltClearEvent(&idrFrameRequiredEvent);
 
         if (stopping) {
             // Bail if we're stopping
             return;
+        }
+
+        triggerCount = consumePendingIdrRequests();
+        if (stopping) {
+            return;
+        }
+        if (triggerCount == 0) {
+            continue;
+        }
+
+        // The first recovery request is immediate. If bad frames continue to ask for IDRs, defer
+        // only long enough to enforce a hard request ceiling and coalesce every trigger received
+        // during that interval. This avoids feeding a congestion/decoder storm while ensuring a
+        // lost IDR is retried within a bounded time.
+        uint64_t now = PltGetMillis();
+        if (lastIdrFrameRequestTimeMs != 0 &&
+                now - lastIdrFrameRequestTimeMs < IDR_REQUEST_MIN_INTERVAL_MS) {
+            uint32_t delayMs = (uint32_t)(
+                    IDR_REQUEST_MIN_INTERVAL_MS - (now - lastIdrFrameRequestTimeMs));
+            deferred = true;
+            PltSleepMsInterruptible(&requestIdrFrameThread, delayMs);
+            if (stopping || PltIsThreadInterrupted(&requestIdrFrameThread)) {
+                return;
+            }
+
+            triggerCount = saturatingAddUint32(triggerCount, consumePendingIdrRequests());
+            if (stopping) {
+                return;
+            }
         }
 
         // Any pending reference frame invalidation requests are now redundant
@@ -1524,6 +1622,8 @@ static void requestIdrFrameFunc(void* context) {
 
         // Request the IDR frame
         requestIdrFrame();
+        lastIdrFrameRequestTimeMs = PltGetMillis();
+        recordIdrRequestPacing(triggerCount, deferred);
     }
 }
 
