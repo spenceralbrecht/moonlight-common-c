@@ -539,6 +539,11 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
 // This function stops streaming. This function is not thread-safe.
 void LiStopConnection(void);
 
+// Splits connection interruption reset from LiStartConnection() for clients that publish
+// connection ownership to another thread before starting. When called, the next
+// LiStartConnection() preserves any LiInterruptConnection() delivered after this function.
+void LiPrepareConnection(void);
+
 // This function interrupts a pending LiStartConnection() call. This interruption happens asynchronously
 // so it is not safe to start another connection before the first LiStartConnection() call returns.
 void LiInterruptConnection(void);
