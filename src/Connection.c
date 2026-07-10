@@ -220,10 +220,15 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     void* audioContext, int arFlags) {
     int err;
 
-    // Preserve an interrupt delivered after LiPrepareConnection(). Other callers retain the
-    // historical behavior where each LiStartConnection() clears stale interruption state itself.
+    // Preserve an interrupt delivered after LiPrepareConnection(). If the owner was already
+    // stopped before this call began, return before platform, network, or renderer setup. Other
+    // callers retain the historical behavior where LiStartConnection() clears a stale interrupt.
     if (ConnectionPreparedExternally) {
         ConnectionPreparedExternally = false;
+        if (ConnectionInterrupted) {
+            Limelog("Connection start canceled before initialization\n");
+            return -1;
+        }
     }
     else {
         ConnectionInterrupted = false;
