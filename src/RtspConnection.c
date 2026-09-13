@@ -1066,7 +1066,10 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         enet_host_flush(client);
     }
 
-    {
+    // Sunshine's OPTIONS handler only echoes CSeq with 200 OK. DESCRIBE supplies
+    // all capabilities we actually consume, so avoid an extra TCP connection
+    // and request/response exchange. NVIDIA retains its original handshake.
+    if (!IS_SUNSHINE()) {
         RTSP_MESSAGE response;
         int error = -1;
 
@@ -1326,8 +1329,14 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         freeMessage(&response);
     }
 
+    // Sunshine starts the stream in ANNOUNCE. Its PLAY handler is another
+    // stateless 200 OK; authentication, encryption and session setup have all
+    // completed above. Do not skip PLAY for NVIDIA or other legacy hosts.
+    if (IS_SUNSHINE()) {
+        Limelog("Sunshine fast handshake: omitted stateless OPTIONS and PLAY exchanges\n");
+    }
     // GFE 3.22 uses a single PLAY message
-    if (APP_VERSION_AT_LEAST(7, 1, 431)) {
+    else if (APP_VERSION_AT_LEAST(7, 1, 431)) {
         RTSP_MESSAGE response;
         int error = -1;
 

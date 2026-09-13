@@ -6,6 +6,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 option(USE_MBEDTLS "Use MbedTLS instead of OpenSSL" OFF)
 option(CODE_ANALYSIS "Run code analysis during compilation" OFF)
+option(BUILD_RTSP_STARTUP_TEST "Build the synthetic RTSP startup fixture" OFF)
 
 SET(CMAKE_C_STANDARD 11)
 
@@ -32,6 +33,12 @@ if (BUILD_SHARED_LIBS_OVERRIDE)
 endif()
 
 target_link_libraries(moonlight-common-c PRIVATE enet)
+
+if(BUILD_RTSP_STARTUP_TEST)
+  add_executable(rtsp-startup-fixture tests/rtsp_startup_fixture.c)
+  target_include_directories(rtsp-startup-fixture PRIVATE src enet/include reedsolomon)
+  target_link_libraries(rtsp-startup-fixture PRIVATE moonlight-common-c)
+endif()
 
 if(MSVC)
   target_compile_options(moonlight-common-c PRIVATE /W3 /wd4100 /wd4232 /wd5105 /WX)
