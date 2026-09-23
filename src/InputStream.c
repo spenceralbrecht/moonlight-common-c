@@ -5,6 +5,13 @@ static unsigned char currentAesIv[16];
 static bool initialized;
 static bool encryptedControlStream;
 static bool needsBatchedScroll;
+// Enqueue time of the last keyboard packet. UTF-8 text only has to wait for reliable
+// control data to drain when a key was sent recently (keyboard and UTF-8 use separate
+// ENet channels, so ordering is not otherwise guaranteed). Without that bound, the
+// 100 ms reliable ping keeps data in transit on high-RTT links and stalls all input.
+static volatile uint64_t lastKeyboardPacketEnqueueMs;
+#define UTF8_KEY_ORDERING_WINDOW_MS 2000
+#define UTF8_KEY_ORDERING_MAX_WAIT_MS 1500
 static int batchedScrollDelta;
 static PPLT_CRYPTO_CONTEXT cryptoContext;
 
@@ -600,12 +607,16 @@ static void inputSendThreadProc(void* context) {
             // have been processed prior to sending these UTF-8 events to avoid interference between
             // the two (especially with modifier keys).
             flushInputOnControlStream();
-            while (!PltIsThreadInterrupted(&inputSendThread) && isControlDataInTransit()) {
-                PltSleepMs(10);
-            }
+            uint64_t waitStartMs = PltGetMillis();
+            if (!IS_SUNSHINE() || waitStartMs - lastKeyboardPacketEnqueueMs < UTF8_KEY_ORDERING_WINDOW_MS) {
+                while (!PltIsThreadInterrupted(&inputSendThread) && isControlDataInTransit() &&
+                       (!IS_SUNSHINE() || PltGetMillis() - waitStartMs < UTF8_KEY_ORDERING_MAX_WAIT_MS)) {
+                    PltSleepMs(10);
+                }
 
-            // Finally, sleep an additional 50 ms to allow the events to be processed by Windows
-            PltSleepMs(50);
+                // Finally, sleep an additional 50 ms to allow the events to be processed by Windows
+                PltSleepMs(50);
+            }
 
             // We send each Unicode code point individually. This way we can always ensure they will
             // never straddle a packet boundary (which will cause a parsing error on the host).
@@ -936,6 +947,7 @@ int LiSendKeyboardEvent2(short keyCode, char keyAction, char modifiers, char fla
 
     holder->channelId = CTRL_CHANNEL_KEYBOARD;
     holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+    lastKeyboardPacketEnqueueMs = PltGetMillis();
 
     // For proper behavior, the MODIFIER flag must not be set on the modifier key down event itself
     // for the extended modifiers on the right side of the keyboard. If the MODIFIER flag is set,
