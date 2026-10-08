@@ -110,6 +110,10 @@ typedef struct _STREAM_CONFIGURATION {
 // Use this function to zero the stream configuration when allocated on the stack or heap
 void LiInitializeStreamConfiguration(PSTREAM_CONFIGURATION streamConfig);
 
+// Refresh positive cellular classification for the current Sunshine session.
+// Expires automatically if the client stops refreshing it. No effect on NVIDIA.
+void LiSetCellularIdleMode(bool cellular);
+
 // These identify codec configuration data in the buffer lists
 // of frames identified as IDR frames for H.264 and HEVC formats.
 // For other codecs, all data is marked as BUFFER_TYPE_PICDATA.
