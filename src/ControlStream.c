@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "CellularIdle.h"
 
 // This is a private header, but it just contains some time macros
 #include <enet/time.h>
@@ -105,6 +106,16 @@ static uint32_t idrFrameRequestTriggers;
 static uint32_t idrFrameRequestsSent;
 static uint32_t idrFrameRequestsCoalesced;
 static uint32_t idrFrameRequestsDeferred;
+static bool cellularIdleMode;
+static uint64_t cellularIdleUpdatedMs;
+
+void LiSetCellularIdleMode(bool cellular) {
+    if (!IS_SUNSHINE()) return;
+    PltLockMutex(&enetMutex);
+    cellularIdleMode = cellular;
+    cellularIdleUpdatedMs = PltGetMillis();
+    PltUnlockMutex(&enetMutex);
+}
 
 static PPLT_CRYPTO_CONTEXT encryptionCtx;
 static PPLT_CRYPTO_CONTEXT decryptionCtx;
@@ -293,6 +304,8 @@ int initializeControlStream(void) {
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
     LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 30);
     PltCreateMutex(&enetMutex);
+    cellularIdleMode = false;
+    cellularIdleUpdatedMs = 0;
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
 
@@ -1336,13 +1349,14 @@ static void lossStatsThreadFunc(void* context) {
     BYTE_BUFFER byteBuffer;
 
     if (usePeriodicPing) {
-        char periodicPingPayload[8];
-
-        BbInitializeWrappedBuffer(&byteBuffer, periodicPingPayload, 0, sizeof(periodicPingPayload), BYTE_ORDER_LITTLE);
-        BbPut16(&byteBuffer, 4); // Length of payload
-        BbPut32(&byteBuffer, 0); // Timestamp?
+        char periodicPingPayload[13];
+        int periodicPingSize;
 
         while (!PltIsThreadInterrupted(&lossStatsThread)) {
+            PltLockMutex(&enetMutex);
+            periodicPingSize = buildCellularIdlePing(periodicPingPayload, IS_SUNSHINE(),
+                cellularIdleMode, cellularIdleUpdatedMs, PltGetMillis());
+            PltUnlockMutex(&enetMutex);
             // For Sunshine servers, send the more detailed per-frame FEC messages
             if (IS_SUNSHINE()) {
                 PQUEUED_FRAME_FEC_STATUS queuedFrameStatus;
@@ -1375,7 +1389,7 @@ static void lossStatsThreadFunc(void* context) {
             // Since the other traffic on this channel is unsequenced, it doesn't really
             // cause any negative HOL blocking side-effects.
             if (!sendMessageAndForget(0x0200,
-                                      sizeof(periodicPingPayload),
+                                      periodicPingSize,
                                       periodicPingPayload,
                                       CTRL_CHANNEL_GENERIC,
                                       ENET_PACKET_FLAG_RELIABLE,

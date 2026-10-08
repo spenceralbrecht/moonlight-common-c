@@ -1,5 +1,16 @@
 # RTSP startup regression harness
 
+The cellular idle ping has a separate, credential-free protocol check:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -Isrc tests/cellular_idle_ping_test.c -o /tmp/cellular-idle-ping-test
+/tmp/cellular-idle-ping-test
+```
+
+It verifies legacy payload length, explicit cellular opt-in, Wi-Fi disable,
+classification expiry and clock reversal. The extension is sent only to
+Sunshine in its existing authenticated periodic ping; no new connection is used.
+
 Build the real native library and fixture with CMake, then run the Python suite
 (Python requires `cryptography`; the native library requires OpenSSL):
 
