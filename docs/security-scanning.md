@@ -3,7 +3,9 @@
 GitHub CodeQL default setup is the scanning source of record for this fork.
 Keep its existing C/C++ scan enabled. The maintained
 `moonshine-adaptive-bitrate` branch is protected from force pushes and deletion
-so default setup includes pushes and pull requests targeting that branch.
+so default setup includes pushes and same-repository pull requests targeting
+that branch. Default setup excludes pull requests whose head is in a fork;
+do not treat those pull requests as scanned without a separate analysis receipt.
 `master` continues to receive its existing default-branch analysis.
 
 An intentionally retained protected `security/consumed-6cc46f7` reference points
